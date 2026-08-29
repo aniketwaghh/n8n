@@ -56,26 +56,11 @@ COPY ./compiled/node_modules/.pnpm/@confluentinc+kafka-javascript@*/node_modules
 WORKDIR /build/node_modules/@confluentinc/kafka-javascript
 RUN BUILD_LIBRDKAFKA=0 node "$NODE_GYP" rebuild --release
 
-FROM toolchain AS builder
-COPY ./compiled /usr/local/lib/node_modules/n8n
-# `bindings` and node-gyp-build both resolve build/Release, so only the compiled
-# artifact has to come across.
-COPY --from=native-builder /build/node_modules/sqlite3/build/Release/node_sqlite3.node \
-     /usr/local/lib/node_modules/n8n/node_modules/sqlite3/build/Release/node_sqlite3.node
-COPY --from=native-builder /build/isolated-vm/build/Release/isolated_vm.node \
-     /usr/local/lib/node_modules/n8n/node_modules/isolated-vm/build/Release/isolated_vm.node
-# kafka-javascript has no top-level symlink and its pnpm directory name carries a
-# patch hash, so the destination has to be globbed by the shell.
-COPY --from=native-builder /build/node_modules/@confluentinc/kafka-javascript/build/Release/confluent-kafka-javascript.node /tmp/
-RUN set -e; \
-    dest=$(echo /usr/local/lib/node_modules/n8n/node_modules/.pnpm/@confluentinc+kafka-javascript@*/node_modules/@confluentinc/kafka-javascript); \
-    mkdir -p "$dest/build/Release"; \
-    mv /tmp/confluent-kafka-javascript.node "$dest/build/Release/"
-# node-gyp-build finds build/Release first. Delete the prebuilds to remove the glibc fallback.
-RUN rm -rf /usr/local/lib/node_modules/n8n/node_modules/isolated-vm/prebuilds
-
 # A separate workflow builds the base image, so a new base reaches this image only
 # when you change the reference here (see BUILDER_IMAGE/RUNTIME_IMAGE above).
+#
+# The application tree lands here directly. An intermediate stage that copied it
+# in only to graft three .node files meant materialising 1.3GB twice.
 FROM ${RUNTIME_IMAGE}
 
 ARG N8N_VERSION
@@ -87,14 +72,32 @@ ENV SHELL=/bin/sh
 
 WORKDIR /home/node
 
-COPY --from=builder /usr/local/lib/node_modules/n8n /usr/local/lib/node_modules/n8n
-COPY docker/images/n8n/docker-entrypoint.sh /
+# --link writes into a fresh snapshot rather than copying up over the parent
+# layer, which is most of the win for a tree this size.
+COPY --link ./compiled /usr/local/lib/node_modules/n8n
+COPY --link docker/images/n8n/docker-entrypoint.sh /
 
-# The base keeps node in /usr/bin and has no /usr/local/bin. Make that directory for the symlink.
-RUN mkdir -p /usr/local/bin && \
-    ln -s /usr/local/lib/node_modules/n8n/bin/n8n /usr/local/bin/n8n && \
-    mkdir -p /home/node/.n8n && \
-    chown -R node:node /home/node && \
+# Plain COPY, not --link: these destinations traverse pnpm symlinks, and a
+# --link copy resolves its destination against an empty root - it would replace
+# the symlink with a real directory and the module would stop resolving, with no
+# build error. A normal copy-up sees the real filesystem and follows them.
+COPY --from=native-builder /build/node_modules/sqlite3/build/Release/node_sqlite3.node \
+     /usr/local/lib/node_modules/n8n/node_modules/sqlite3/build/Release/node_sqlite3.node
+COPY --from=native-builder /build/isolated-vm/build/Release/isolated_vm.node \
+     /usr/local/lib/node_modules/n8n/node_modules/isolated-vm/build/Release/isolated_vm.node
+# kafka-javascript has no top-level symlink and its pnpm directory name carries a
+# patch hash, so this one destination has to be globbed by the shell.
+COPY --from=native-builder /build/node_modules/@confluentinc/kafka-javascript/build/Release/confluent-kafka-javascript.node /tmp/
+
+# The base keeps node in /usr/bin and ships no /usr/local/bin.
+RUN set -e; \
+    N8N=/usr/local/lib/node_modules/n8n; \
+    kafka=$(echo "$N8N"/node_modules/.pnpm/@confluentinc+kafka-javascript@*/node_modules/@confluentinc/kafka-javascript); \
+    install -D /tmp/confluent-kafka-javascript.node "$kafka/build/Release/confluent-kafka-javascript.node"; \
+    mkdir -p /usr/local/bin; \
+    ln -s "$N8N/bin/n8n" /usr/local/bin/n8n; \
+    mkdir -p /home/node/.n8n; \
+    chown -R node:node /home/node; \
     rm -rf /root/.npm /tmp/*
 
 EXPOSE 5678/tcp
