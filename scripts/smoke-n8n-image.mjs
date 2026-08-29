@@ -5,6 +5,7 @@
 
 import { $, echo, chalk, fs, tmpdir } from 'zx';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseAllDocuments } from 'yaml';
 
 $.verbose = false;
@@ -126,6 +127,27 @@ async function runWorkspaceDedupCheck() {
 	}
 }
 
+// The kafka binding is compiled inside the image rather than shipped prebuilt
+// (see docker/images/n8n/Dockerfile), so a bad build only surfaces at require()
+// time. Reuses the same script the release build runs against the pushed image.
+const KAFKA_CHECK = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	'../.github/scripts/docker/kafka-native-smoke-check.mjs',
+);
+
+async function runKafkaBindingCheck() {
+	const name = 'kafka native binding loads in image';
+	try {
+		await $({
+			timeout: TIMEOUT,
+		})`docker run --rm --entrypoint node -v ${`${KAFKA_CHECK}:/tmp/kafka-check.mjs:ro`} ${IMAGE} /tmp/kafka-check.mjs`;
+		echo(chalk.green(`✓ ${name}`));
+		return true;
+	} catch (err) {
+		return reportFailure(name, err);
+	}
+}
+
 // Interpreter paths as launched by docker/images/runners/n8n-task-runners.json.
 // The runners images assemble node/python by copying binaries across images, so a
 // missing shared library only surfaces at exec time.
@@ -183,6 +205,7 @@ const ok = (
 	await Promise.all([
 		...invocations.map(run),
 		runWorkspaceDedupCheck(),
+		runKafkaBindingCheck(),
 		...RUNNERS_IMAGES.map(runRunnersInterpreterCheck),
 	])
 ).every(Boolean);

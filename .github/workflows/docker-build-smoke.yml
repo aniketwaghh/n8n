@@ -24,12 +24,18 @@ on:
     - cron: '0 3 * * *' # 3:00 AM UTC, after the nightly Docker build at midnight
   pull_request:
     paths:
+      - 'docker/docker-bake.hcl'
       - 'docker/images/n8n/**'
       - 'docker/images/n8n-base/**'
       - 'docker/images/runners/**'
       - 'scripts/build-n8n.mjs'
       - 'scripts/dockerize-n8n.mjs'
       - 'scripts/smoke-n8n-image.mjs'
+      # Patched native deps (e.g. @confluentinc/kafka-javascript) land here.
+      # pnpm-workspace.yaml is deliberately excluded: it changes ~43x/month
+      # against this job's ~26, and a two-arch no-cache build is too expensive
+      # to double. An unpatched dep bump is caught by the nightly instead.
+      - 'patches/**'
   workflow_dispatch:
 
 concurrency:
@@ -70,6 +76,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           build-command: 'pnpm build:docker:clean'
           enable-docker-cache: true
+          docker-cache-key: n8n-io/n8n
 
       - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
 
