@@ -33,11 +33,11 @@ runs:
       with:
         build-command: ${{ inputs.build-variant == 'coverage' && 'pnpm build:docker:coverage' || 'pnpm build:docker' }}
         enable-docker-cache: true
+        docker-cache-key: n8n-io/n8n
       env:
         INCLUDE_TEST_CONTROLLER: 'true'
-        # Keep the pc pins in sync with the -pc build in docker-build-push.yml.
-        BUILDER_IMAGE: ${{ inputs.build-variant == 'pc' && 'n8nio/node-pc:26.7.0-dev@sha256:c64642dcb9464e50bd08aef8504affafeb795d01aed2f7ab158976c334a36ef6' || '' }}
-        RUNTIME_IMAGE: ${{ inputs.build-variant == 'pc' && 'n8nio/node-pc:26.7.0@sha256:6577d0742ad043baaa39db7dda2ce8aeb73f32c84eb241c49bf716f170c53297' || '' }}
+        # Selects the n8n-pc bake target, which carries the pointer-compressed pins.
+        DOCKER_BUILD_PC: ${{ inputs.build-variant == 'pc' }}
 
     - name: Assert pointer compression
       if: steps.cache-check.outputs.cache-hit != 'true' && inputs.build-variant == 'pc'
