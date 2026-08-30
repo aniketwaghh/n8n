@@ -13,6 +13,8 @@
  *   NODE_VERSION, BUILDER_IMAGE, RUNTIME_IMAGE          - read by bake directly
  *   DOCKER_PLATFORM                                     - cross-platform builds
  *   DOCKER_BUILD_NO_CACHE, DOCKER_BUILD_BASE_IMAGE, DOCKER_BUILD_DISTROLESS
+ *   DOCKER_BUILD_TARBALL_DIR - write per-target docker-archives here instead of
+ *                              loading into the daemon (CI image distribution)
  *   CONTAINER_ENGINE                                    - force 'docker' or 'podman'
  */
 
@@ -42,6 +44,9 @@ const imageTag = process.env.IMAGE_TAG || 'local';
 // Push directly when the name carries a registry host, which avoids the slow
 // --load export/import round-trip.
 const shouldPush = imageBaseName.split('/').length > 2;
+// CI wants a tarball, not images in the daemon. Writing it straight from BuildKit
+// skips the dockerd import and the `docker save` that reads it back out again.
+const tarballDir = process.env.DOCKER_BUILD_TARBALL_DIR;
 
 const compiledAppDir = path.join(rootDir, 'compiled');
 const compiledTaskRunnerDir = path.join(rootDir, 'dist', 'task-runner-javascript');
@@ -138,13 +143,26 @@ async function buildWithBake(targets) {
 	const driver = await buildxDriver();
 	const isContainerDriver = driver !== 'docker';
 
+	// `compression=zstd` compresses the layers inside the archive, so no separate
+	// compression pass is needed - the file is cache-ready as written.
+	const tarballOutputs = targets.flatMap((t) => [
+		'--set',
+		`${t}.output=type=docker,dest=${path.join(tarballDir ?? '', `${t}.tar`)},compression=zstd,compression-level=3`,
+	]);
+
 	const flags = [
 		...(noCache ? ['--no-cache'] : []),
 		// The 'docker' driver builds straight into the daemon and rejects both flags.
-		...(isContainerDriver ? ['--provenance=false', shouldPush ? '--push' : '--load'] : []),
+		...(isContainerDriver
+			? [
+					'--provenance=false',
+					...(tarballDir ? tarballOutputs : [shouldPush ? '--push' : '--load']),
+				]
+			: []),
 	];
 
 	echo(chalk.yellow(`INFO: Building ${targets.join(', ')} with docker buildx bake...`));
+	if (tarballDir) echo(chalk.yellow(`INFO: Writing image tarballs to ${tarballDir}`));
 	if (shouldPush) echo(chalk.yellow(`INFO: Registry detected - pushing directly`));
 
 	await $({ verbose: true })`docker buildx bake -f ${BAKE_FILE} ${targets} ${flags}`;
@@ -200,6 +218,8 @@ async function main() {
 	let platform;
 	let imageNames;
 
+	if (tarballDir) await fs.ensureDir(tarballDir);
+
 	if (usePodman) {
 		platform = hostPlatform();
 		imageNames = await buildWithPodman(platform);
@@ -216,7 +236,10 @@ async function main() {
 
 	const images = [];
 	for (const imageName of imageNames) {
-		images.push({ imageName, size: await getImageSize(imageName) });
+		// In tarball mode nothing is loaded into the daemon, so there is no size to
+		// read. Left out rather than reported as the compressed archive size, which
+		// would silently change what the docker-image-size metric means.
+		images.push({ imageName, size: tarballDir ? 'Unknown' : await getImageSize(imageName) });
 	}
 
 	await fs.writeJson(
